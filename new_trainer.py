@@ -181,8 +181,6 @@ class Trainer:
                 
                 with torch.no_grad():
 
-                    if iteration%1000:
-                        self.log_data(image, gt_image, Ll1,loss,num_gaussians)
 
                     # Progress bar
                     ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
@@ -193,12 +191,15 @@ class Trainer:
                         progress_bar.close()
 
                     # # Log and save
-                    # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+                    if iteration%1000:
+                        self.log_data(image, gt_image, Ll1,loss,num_gaussians)
+
                     if (iteration in saving_iterations):
                         print("\n[ITER {}] Saving Gaussians".format(iteration))
                         scene.save(iteration)
 
                     self.densify(iteration, visibility_filter, radii, viewspace_point_tensor)
+
 
                 iteration+=1
 
