@@ -20,6 +20,196 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from glob import glob
+from PIL import Image
+from copy import deepcopy
+import matplotlib.pyplot as plt
+import random
+
+def read_depth_image_paths(depth_path):
+    if os.path.exists(depth_path):
+        left_depth_images = sorted(glob(os.path.join(depth_path,"image_02","*.png")))
+        right_depth_images = sorted(glob(os.path.join(depth_path,"image_03","*.png")))
+        depth_image_paths = {'left': left_depth_images, 'right': right_depth_images}
+        return depth_image_paths
+
+def depth_read(filename):
+    # loads depth map D from png file
+    # and returns it as a numpy array,
+    # for details see readme.txt
+
+    depth_png = np.array(Image.open(filename), dtype=int)
+    # make sure we have a proper 16bit depth map here.. not 8bit!
+    assert(np.max(depth_png) > 255)
+
+    depth = depth_png.astype(np.float64) / 256.
+    depth[depth_png == 0] = -1.     #   Set
+    return depth
+
+
+def depth_to_point_cloud(depth_image, intrinsics):
+    """
+    Convert a depth image to a 3D point cloud using camera intrinsics.
+
+    Parameters:
+    - depth_image: 2D numpy array representing the depth values.
+    - intrinsics: Camera intrinsic parameters [fx, fy, cx, cy].
+
+    Returns:
+    - points_3d: 2D numpy array of shape (num_points, 3) representing 3D coordinates.
+    """
+    fx, fy, cx, cy = intrinsics[0,0], intrinsics[1,1], intrinsics[0,2], intrinsics[1,2]
+
+    # Mask out missing depth values (-1)
+    valid_mask = (depth_image != -1)
+
+    # Get the pixel coordinates only for valid depth values
+    u, v = np.meshgrid(np.arange(depth_image.shape[1]), np.arange(depth_image.shape[0]))
+    u = u[valid_mask]
+    v = v[valid_mask]
+
+    # Convert valid depth values to 3D coordinates
+    X = (u - cx) * depth_image[valid_mask] / fx
+    Y = (v - cy) * depth_image[valid_mask] / fy
+    Z = depth_image[valid_mask]
+
+    # Stack X, Y, Z to get the 3D point cloud
+    points_3d = np.stack([X, Y, Z], axis=-1)
+
+    return points_3d
+
+
+def synchronize_depth_and_gt_depth(depth_image_paths,gt_depth_image_paths, offset):
+    _, img_name = os.path.split(gt_depth_image_paths['left'][0])
+    img_base = img_name.split('.')[0]
+    present_ids = []
+    for i,img_name in enumerate(depth_image_paths['left']):
+        if img_base in img_name:
+            present_ids.append(i)
+    
+    num_depth_images = len(depth_image_paths['left'])
+    synchronized_left_depth_images = depth_image_paths['left'][offset:num_depth_images-offset]
+    synchronized_right_depth_images = depth_image_paths['right'][offset:num_depth_images-offset]
+    synchronized_depth_image_paths = {'left': synchronized_left_depth_images, 'right':synchronized_right_depth_images}
+    return synchronized_depth_image_paths
+    
+def synchronize_depth_and_scene_info(scene_info, depth_path, gt_depth_path, offset):
+
+    # synchronized_depth_image_paths = synchronize_depth_and_gt_depth(depth_image_paths, gt_depth_image_paths, offset)
+
+    train_depth_image_paths, test_depth_image_paths = {'left': [], 'right': []}, {'left': [], 'right': []}
+    train_gt_depth_image_paths, test_gt_depth_image_paths = {'left': [], 'right': []}, {'left': [], 'right': []}
+
+    train_camera_image_names = [cam.image_name for cam in scene_info.train_cameras]
+    test_camera_image_names = [cam.image_name for cam in scene_info.test_cameras]
+
+    left_depth_image_paths = sorted(glob(os.path.join(depth_path,'image_02','*.png')))
+    right_depth_image_paths = sorted(glob(os.path.join(depth_path,'image_03','*.png')))
+
+    gt_left_depth_image_paths = sorted(glob(os.path.join(gt_depth_path,'image_02','*.png')))
+    gt_right_depth_image_paths = sorted(glob(os.path.join(gt_depth_path,'image_03','*.png')))
+
+    start_index, stop_index = 0,0
+    indices = []
+    for img_path in gt_left_depth_image_paths:
+        img_name = os.path.split(img_path)[1].split('.')[0]
+        img_id = int(img_name)
+        indices.append(img_id)
+    start_index, stop_index = min(indices), max(indices)
+    
+
+    assert(len(left_depth_image_paths) == len(right_depth_image_paths))
+    num_depth_images = len(left_depth_image_paths)
+    synchronized_left_depth_images = left_depth_image_paths[offset:num_depth_images-offset]
+    synchronized_right_depth_images = right_depth_image_paths[offset:num_depth_images-offset]
+
+    assert(len(synchronized_left_depth_images) == len(gt_left_depth_image_paths) )
+    assert(len(synchronized_right_depth_images) == len(gt_right_depth_image_paths) )
+
+    for image_name in train_camera_image_names:
+        
+        cam_id = image_name.split('_')[0]
+        img_base = image_name.split('_')[1]
+        img_id = int(image_name.split('_')[1])
+        if ( (img_id >=start_index) and (img_id <=stop_index)):
+
+            if cam_id == '02':
+                depth_img_path = os.path.join(depth_path,'image_02',image_name+".png")
+                gt_depth_img_path = os.path.join(gt_depth_path,'image_02',img_base+".png")
+                train_depth_image_paths['left'].append(depth_img_path)
+                train_gt_depth_image_paths['left'].append(gt_depth_img_path)
+            elif cam_id == '03':
+                depth_img_path = os.path.join(depth_path,'image_03',image_name+".png")
+                gt_depth_img_path = os.path.join(gt_depth_path,'image_03',img_base+".png")
+                train_depth_image_paths['right'].append(depth_img_path)
+                train_gt_depth_image_paths['right'].append(gt_depth_img_path)
+
+
+    for image_name in test_camera_image_names:
+        
+        cam_id = image_name.split('_')[0]
+        img_base = image_name.split('_')[1]
+        img_id = int(image_name.split('_')[1])
+        if ( (img_id >=start_index) and (img_id <=stop_index)):
+
+            if cam_id == '02':
+                depth_img_path = os.path.join(depth_path,'image_02',image_name+".png")
+                gt_depth_img_path = os.path.join(gt_depth_path,'image_02',img_base+".png")
+                test_depth_image_paths['left'].append(depth_img_path)
+                test_gt_depth_image_paths['left'].append(gt_depth_img_path)
+            elif cam_id == '03':
+                depth_img_path = os.path.join(depth_path,'image_03',image_name+".png")
+                gt_depth_img_path = os.path.join(gt_depth_path,'image_03',img_base+".png")
+                test_depth_image_paths['right'].append(depth_img_path)
+                test_gt_depth_image_paths['right'].append(gt_depth_img_path)
+
+    train_cameras, test_cameras = [], []
+    for cam in scene_info.train_cameras:
+        cam_id, img_id = cam.image_name.split('_')[0], int(cam.image_name.split('_')[1])
+        if (img_id >=start_index) and (img_id <=stop_index):
+            train_cameras.append(deepcopy(cam))
+
+    for cam in scene_info.test_cameras:
+        cam_id, img_id = cam.image_name.split('_')[0], int(cam.image_name.split('_')[1])
+        if (img_id >=start_index) and (img_id <=stop_index):
+            test_cameras.append(deepcopy(cam))
+        # print(cam_id, img_id)
+        # input()
+    # scene_info.train_cameras = train_cameras
+    # scene_info.test_cameras = test_cameras
+    return train_cameras, test_cameras, train_depth_image_paths, test_depth_image_paths, train_gt_depth_image_paths, test_gt_depth_image_paths
+
+def get_depth_scale(depth_image, gt_depth_image):
+    """
+        Input:
+            depth_image: HxW np.array, Depth image predicted from a pre-trained network.
+            gt_depth_image: HxW np.array, Ground truth depth image taken from lidar data.
+        
+    """
+
+    #   1) Find valid depth indices
+    valid_indices = gt_depth_image!=-1
+    valid_gt_depth_values = gt_depth_image[valid_indices]
+    corresponding_depth_values = depth_image[valid_indices]
+    scales = valid_gt_depth_values/corresponding_depth_values
+    final_scale = np.median(scales)
+
+    # fig, axs = plt.subplots(1, 3, sharey=True, tight_layout=True)
+    # n_bins=100
+    # # We can set the number of bins with the *bins* keyword argument.
+    # axs[0].hist(scales, bins=n_bins)
+    # axs[1].hist(corresponding_depth_values, bins=n_bins)
+    # axs[2].hist(valid_gt_depth_values, bins=n_bins)
+    # plt.show()
+
+    return final_scale
+
+def get_subsampled_indices(num_indices, num_samples=100000):
+    if num_samples >num_indices:
+        num_samples = num_indices
+    permutation = random.sample(range(0, num_indices), num_indices)
+    return permutation[:num_samples]
+
 
 class GaussianModel:
 
@@ -39,7 +229,6 @@ class GaussianModel:
         self.inverse_opacity_activation = inverse_sigmoid
 
         self.rotation_activation = torch.nn.functional.normalize
-
 
     def __init__(self, sh_degree : int):
         self.active_sh_degree = 0
@@ -91,6 +280,20 @@ class GaussianModel:
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
+
+    def freeze_params(self):
+        self._features_dc.requires_grad = False
+        self._features_rest.requires_grad = False
+        self._scaling.requires_grad = False
+        self._opacity.requires_grad = False
+        self._rotation.requires_grad = False
+
+    def unfreeze_params(self):
+        self._features_dc.requires_grad = True
+        self._features_rest.requires_grad = True
+        self._scaling.requires_grad = True
+        self._opacity.requires_grad = True
+        self._rotation.requires_grad = True
 
     @property
     def get_scaling(self):
@@ -145,6 +348,82 @@ class GaussianModel:
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+
+    def create_from_depth_map(self, depth_dict, scene_info, spatial_lr_scale: float=1.0):
+        '''
+            Inputs:
+                depth_path: points to the depth images generated from a pre-trained depth estimation network
+                gt_depth_path: points to ground truth depth maps.
+                K: contains the intrinsics
+        '''
+        depth_path = depth_dict['depth_path']
+        gt_depth_path = depth_dict['gt_depth_path']
+        K_left, K_right = depth_dict['K_left'], depth_dict['K_right']
+        # print(f"depth_path: {depth_path}")
+        # print(f"gt_depth_path: {gt_depth_path}")
+        # depth_image_paths = read_depth_image_paths(depth_path)
+        # gt_depth_image_paths = read_gt_depth_image_paths(gt_depth_path)
+
+        train_cameras, test_cameras, \
+        train_depth_image_paths, test_depth_image_paths, \
+        train_gt_depth_image_paths, test_gt_depth_image_paths = synchronize_depth_and_scene_info(scene_info, depth_path, gt_depth_path, offset=5)
+                
+        depth_image = depth_read(train_depth_image_paths['left'][0])
+        gt_depth_image = depth_read(train_gt_depth_image_paths['left'][0])
+
+        scale = get_depth_scale(depth_image, gt_depth_image)
+        scaled_depth_image = depth_image*scale
+        print(train_gt_depth_image_paths['left'][0])
+        
+        valid_depth_indices = depth_image!=-1
+
+        # fig, axs = plt.subplots(1, 2, sharey=True, tight_layout=True)
+        # n_bins=100
+        # # We can set the number of bins with the *bins* keyword argument.
+        # axs[0].imshow(depth_image/np.max(depth_image))
+        # axs[1].imshow(scaled_depth_image/np.max(scaled_depth_image))
+
+        point_cloud = depth_to_point_cloud(scaled_depth_image, K_left) #   extract point cloud from depth image
+        point_colors = np.array(train_cameras[0].image)[valid_depth_indices]/256. #   extract valid rgb values. 
+
+        sampled_indices = get_subsampled_indices(point_cloud.shape[0])
+        point_cloud, point_colors = point_cloud[sampled_indices,:], point_colors[sampled_indices,:]
+        pt_cld = BasicPointCloud(points = point_cloud, colors = point_colors, normals = np.zeros_like(point_cloud))
+        
+
+
+        self.create_from_pcd(pt_cld, spatial_lr_scale)
+
+        return train_cameras, test_cameras, train_depth_image_paths, \
+            test_depth_image_paths, train_gt_depth_image_paths, test_gt_depth_image_paths
+
+        # synchronized_depth_image_paths = synchronize_depth_and_gt_depth(depth_image_paths,gt_depth_image_paths,offset=5)
+        # depth_image = depth_read(synchronized_depth_image_paths['left'][0])
+        # gt_depth_image = gt_depth_read(gt_depth_image_paths['left'][0])
+        # H, W = depth_image.shape
+        # gt_pt3d = depth_to_point_cloud(gt_depth_image, K_left)
+        # pt3d = depth_to_point_cloud(depth_image, K_left)
+        
+        # print(f"pt3d.shape: {pt3d.shape} gt_pt3d.shape: {gt_pt3d.shape}")
+
+        # camera = scene_info.train_cameras[5]
+        
+        # print(f"HI")
+        # import open3d as o3d
+
+        # # Load the point cloud
+        # # pcd = o3d.read_point_cloud("path/to/point_cloud.pcd")
+        # pcd = o3d.geometry.PointCloud()
+        # pcd.points = o3d.utility.Vector3dVector(pt3d)
+        # o3d.visualization.draw_geometries([pcd])
+
+        # # Visualize the point cloud
+        # vis = o3d.visualization.Visualizer()
+        # vis.add_geometry(pcd)
+        # vis.run()
+
+
+        
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense

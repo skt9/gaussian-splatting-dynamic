@@ -17,12 +17,26 @@ from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+from typing import List, Dict
+import numpy as np
 
+def kitti_split_cameras(cameras, args):
+    left_cameras, right_cameras = [], []
+    for cam in cameras:
+        cam_id = cam.image_name.split('_')[0]
+        if (cam_id == '02'):
+            left_cameras.append(cam)
+        else:
+            right_cameras.append(cam)
+    camera_dict = {'left': cameraList_from_camInfos(left_cameras, 1.0, args), 'right': cameraList_from_camInfos(right_cameras, 1.0, args)}
+    return camera_dict
 class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, 
+                 load_iteration: int=None, shuffle: bool=True, 
+                 resolution_scales: List[int]=[1.0], depth_dict: Dict=None):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -39,6 +53,8 @@ class Scene:
 
         self.train_cameras = {}
         self.test_cameras = {}
+        
+        
 
         if os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval)
@@ -70,9 +86,9 @@ class Scene:
 
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")
-            self.train_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
+            self.train_cameras = cameraList_from_camInfos(scene_info.train_cameras, resolution_scale, args)
             print("Loading Test Cameras")
-            self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
+            self.test_cameras = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
 
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
@@ -80,14 +96,29 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            if depth_dict is not None:
+                # self.intrinsics = intrinsics
+                train_cameras, test_cameras, \
+                train_depth_image_paths, test_depth_image_paths, \
+                train_gt_depth_image_paths, test_gt_depth_image_paths = self.gaussians.create_from_depth_map(depth_dict, scene_info)
+
+                self.train_cameras = kitti_split_cameras(train_cameras, args)
+                self.test_cameras = kitti_split_cameras(test_cameras, args)
+                self.train_depth_image_paths = train_depth_image_paths
+                self.test_depth_image_paths = test_depth_image_paths
+                self.train_gt_image_paths = train_gt_depth_image_paths
+                self.test_gt_depth_image_paths = test_gt_depth_image_paths
+            else:
+                self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
 
-    def getTrainCameras(self, scale=1.0):
-        return self.train_cameras[scale]
+    def getTrainCameras(self):
+        return self.train_cameras
 
-    def getTestCameras(self, scale=1.0):
-        return self.test_cameras[scale]
+    
+
+    def getTestCameras(self):
+        return self.test_cameras

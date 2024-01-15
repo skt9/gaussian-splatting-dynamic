@@ -1,0 +1,1 @@
+python new_trainer.py --mask_path /home/sid/Desktop/KITTI_Dataset_MOTS/KITTI2/Masks/ --source_path /home/sid/Desktop/KITTI_Dataset_MOTS/KITTI2/ --eval
